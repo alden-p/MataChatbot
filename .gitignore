@@ -1,0 +1,53 @@
+# Logs
+*.log
+
+# Vim editor files
+*.swp
+*.swo
+*.swn
+*.un~
+*~
+.netrwhist
+
+# Python bytecode, environments, and local configuration
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+pyvenv.cfg
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Local environment files
+.env
+.env.*
+*.local
+
+# Spreadsheet and document files
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+*.ods
+*.pdf
+
+# Common temporary and operating-system files
+*.bak
+*.tmp
+*.temp
+.DS_Store
+.AppleDouble
+Thumbs.db
+Desktop.ini
