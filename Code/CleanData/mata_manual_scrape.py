@@ -1,5 +1,5 @@
 # Author: Alden Porter
-# Extract Mata manual text and create function question-and-answer training records.
+# Extract Mata manual text and write an extraction-quality report.
 
 import json
 import os
@@ -19,13 +19,13 @@ from pdfminer.pdfpage import PDFPage
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RAW_PDF_PATH = REPOSITORY_ROOT / "Input/Raw/m-2.pdf"
 TEXT_OUTPUT_PATH = REPOSITORY_ROOT / "Input/Intermediate/mata_manual.txt"
-TRAINING_OUTPUT_PATH = REPOSITORY_ROOT / "Input/Clean/training_data.jsonl"
 REPORT_OUTPUT_PATH = REPOSITORY_ROOT / "Input/Intermediate/mata_manual_scrape_report.json"
 
 TITLE_PATTERN = re.compile(
     r"^(?P<function>.+?\(\s*\))\s+[—-]\s+"
     r"(?P<purpose>.+?)(?:\s+(?P<printed_page>\d+))?$"
 )
+FUNCTION_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\*?\(\)$")
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 WHITESPACE = re.compile(r"[ \t]+")
 PAGE_NUMBER_TEXTS = frozenset(str(number) for number in range(1, 1200))
@@ -130,13 +130,19 @@ def canonicalize_function(function: str) -> str:
 def title_from_line(text: str):
     match = TITLE_PATTERN.match(text)
     if not match:
-        return None
+        return None, None
 
     function = canonicalize_function(normalize_text(match.group("function")))
+    function = re.sub(r"^\[M-5\]\s*", "", function)
     purpose = normalize_text(match.group("purpose")).rstrip(".")
-    if not function or not purpose or len(function) > 100:
-        return None
-    return function, purpose, match.group("printed_page") or ""
+    if not FUNCTION_IDENTIFIER.fullmatch(function):
+        return None, {
+            "text": text,
+            "reason": f"malformed function identifier {function!r}",
+        }
+    if not purpose:
+        return None, {"text": text, "reason": "missing title purpose"}
+    return (function, purpose, match.group("printed_page") or ""), None
 
 
 def rendered_rows(
@@ -192,30 +198,6 @@ def atomic_write_text(path: Path, text: str) -> None:
     os.replace(temporary_path, path)
 
 
-def atomic_write_jsonl(path: Path, records: Sequence[dict]) -> None:
-    text = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
-    atomic_write_text(path, text)
-
-
-def load_training_records(path: Path) -> List[dict]:
-    if not path.is_file():
-        raise FileNotFoundError(f"Curated training data does not exist: {path}")
-    records = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ValueError(
-                f"Curated training record {line_number} is invalid JSON: {error.msg}"
-            ) from error
-        if set(record) != {"prompt", "completion"}:
-            raise ValueError(
-                f"Curated training record {line_number} must contain prompt and completion."
-            )
-        records.append(record)
-    return records
-
-
 def extract_pdf_pages(path: Path) -> List[Tuple[int, List[ExtractedLine]]]:
     if not path.is_file():
         raise FileNotFoundError(f"Source PDF does not exist: {path}")
@@ -263,24 +245,27 @@ def page_furniture_category(row: RenderedRow) -> str | None:
 
 def render_manual(
     pages: Sequence[Tuple[int, List[ExtractedLine]]],
-) -> Tuple[str, List[FunctionEntry], Counter]:
+) -> Tuple[str, List[FunctionEntry], Counter, List[dict]]:
     output = []
     entries = []
     extraction_metrics = Counter()
     retained_section_labels = Counter()
+    rejected_headings = []
     for page_number, extracted_lines in pages:
         rows = rendered_rows(extracted_lines)
         page_lines = []
         printed_page = ""
         for row in rows:
-            title = title_from_line(row.text)
+            title, rejection = title_from_line(row.text)
+            if rejection and row.y1 >= 590:
+                rejection["source_pdf_page"] = page_number
+                rejected_headings.append(rejection)
             if title:
                 function, purpose, title_page = title
                 # M-5 documentation entries are page-top titles. Restricting
                 # parsing to this band avoids collecting function calls from
                 # examples such as ``return(foo()) -- bar`` in body text.
                 if row.y1 >= 590:
-                    function = re.sub(r"^\[M-5\]\s*", "", function)
                     printed_page = title_page or printed_page
                     entries.append(
                         FunctionEntry(function, purpose, page_number, title_page)
@@ -301,57 +286,15 @@ def render_manual(
         output.extend((marker, *page_lines, ""))
     for label in EXPECTED_SECTION_LABELS:
         extraction_metrics[f"retained_{label}"] = retained_section_labels[label]
-    return "\n".join(output).rstrip() + "\n", entries, extraction_metrics
-
-
-def create_training_records(entries: Sequence[FunctionEntry]) -> List[dict]:
-    seen = set()
-    records = []
-    for entry in entries:
-        key = (entry.function, entry.purpose)
-        if key in seen:
-            continue
-        seen.add(key)
-        purpose = entry.purpose.lower()
-        records.append(
-            {
-                "prompt": f"What Mata function is used for {purpose}?",
-                "completion": f"{entry.function} is used for {purpose}.",
-            }
-        )
-    if not records:
-        raise ValueError("Could not create Mata function training records.")
-    return records
+    return "\n".join(output).rstrip() + "\n", entries, extraction_metrics, rejected_headings
 
 
 def validation_report(
     pages: Sequence[Tuple[int, List[ExtractedLine]]],
     entries: Sequence[FunctionEntry],
-    records: Sequence[dict],
     extraction_metrics: Counter,
+    rejected_headings: Sequence[dict],
 ) -> dict:
-    missing_prompts = []
-    missing_completions = []
-    incomplete_prompts = []
-    incomplete_completions = []
-    duplicate_prompts = []
-    seen_prompts = set()
-
-    for number, record in enumerate(records, start=1):
-        prompt = record.get("prompt", "")
-        completion = record.get("completion", "")
-        if not prompt.strip():
-            missing_prompts.append(number)
-        if not completion.strip():
-            missing_completions.append(number)
-        if prompt and (not prompt.endswith("?") or len(prompt.split()) < 6):
-            incomplete_prompts.append(number)
-        if completion and (not completion.endswith(".") or " is used for " not in completion):
-            incomplete_completions.append(number)
-        if prompt in seen_prompts:
-            duplicate_prompts.append(number)
-        seen_prompts.add(prompt)
-
     title_pages = {entry.pdf_page for entry in entries}
     return {
         "source_pdf": str(RAW_PDF_PATH.relative_to(REPOSITORY_ROOT)),
@@ -371,24 +314,17 @@ def validation_report(
         },
         "function_heading_occurrences": len(entries),
         "unique_function_names": len({entry.function for entry in entries}),
-        "unique_function_records": len(records),
         "function_heading_pages": len(title_pages),
-        "records": {
-            "missing_prompts": {"count": len(missing_prompts), "records": missing_prompts},
-            "missing_completions": {
-                "count": len(missing_completions),
-                "records": missing_completions,
-            },
-            "incomplete_prompts": {
-                "count": len(incomplete_prompts),
-                "records": incomplete_prompts,
-            },
-            "incomplete_completions": {
-                "count": len(incomplete_completions),
-                "records": incomplete_completions,
-            },
-            "duplicate_prompts": {"count": len(duplicate_prompts), "records": duplicate_prompts},
-        },
+        "rejected_heading_candidates": list(rejected_headings),
+        "function_headings": [
+            {
+                "function": entry.function,
+                "purpose": entry.purpose,
+                "source_pdf_page": entry.pdf_page,
+                "printed_page": entry.printed_page,
+            }
+            for entry in entries
+        ],
         "sample_entries": [
             {
                 "function": entry.function,
@@ -404,15 +340,15 @@ def validation_report(
 def main() -> None:
     print("Extracting Mata manual text with page coordinates...")
     pages = extract_pdf_pages(RAW_PDF_PATH)
-    manual_text, entries, extraction_metrics = render_manual(pages)
-    records = load_training_records(TRAINING_OUTPUT_PATH)
-    report = validation_report(pages, entries, records, extraction_metrics)
+    manual_text, entries, extraction_metrics, rejected_headings = render_manual(pages)
+    report = validation_report(pages, entries, extraction_metrics, rejected_headings)
 
     atomic_write_text(TEXT_OUTPUT_PATH, manual_text)
     atomic_write_text(REPORT_OUTPUT_PATH, json.dumps(report, indent=2) + "\n")
     print(
-        f"Created {len(records)} training records, {len(entries)} headings, "
-        f"and validation report in {REPORT_OUTPUT_PATH}."
+        f"Extracted {len(entries)} clean headings and rejected {len(rejected_headings)} "
+        f"malformed candidates; wrote the validation report "
+        f"to {REPORT_OUTPUT_PATH}."
     )
 
 
