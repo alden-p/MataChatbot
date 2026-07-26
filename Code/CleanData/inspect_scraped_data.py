@@ -9,6 +9,11 @@ MANUAL_PATH = REPOSITORY_ROOT / "Input/Intermediate/mata_manual.txt"
 RECORDS_PATH = REPOSITORY_ROOT / "Input/Clean/training_data.jsonl"
 REPORT_PATH = REPOSITORY_ROOT / "Input/Intermediate/mata_manual_scrape_report.json"
 REQUIRED_FUNCTIONS = {"abbrev()", "docx*()", "Pdf*()", "solve_tol()", "st_data()"}
+LATER_FUNCTION_PAGE = 327
+KNOWN_NAVIGATION_HEADERS = {
+    "Description Syntax Conformability Diagnostics Also see",
+    "Description Syntax Remarks and examples Conformability Diagnostics Also see",
+}
 
 
 def load_records(path: Path) -> list[dict]:
@@ -44,6 +49,30 @@ def main() -> None:
         raise ValueError("Extracted manual contains form-feed page artifacts.")
     if any(ord(character) < 32 and character not in "\n\t" for character in manual):
         raise ValueError("Extracted manual contains control characters.")
+    extraction_qc = report["extraction_qc"]
+    if extraction_qc["total_pages_processed"] != page_markers:
+        raise ValueError("Extraction QC page total does not match source-page markers.")
+    if extraction_qc["removed_page_furniture"]["headers"] == 0:
+        raise ValueError("Extraction QC did not remove any navigation headers.")
+    if extraction_qc["removed_page_furniture"]["page_numbers"] == 0:
+        raise ValueError("Extraction QC did not remove any page numbers.")
+    for label in ("Description", "Syntax", "Remarks and examples", "Also see"):
+        if extraction_qc["retained_section_labels"][label] == 0:
+            raise ValueError(f"Extraction QC did not retain any {label!r} section labels.")
+
+    page_start = f"<!-- source-pdf-page: {LATER_FUNCTION_PAGE}"
+    page_end = f"<!-- source-pdf-page: {LATER_FUNCTION_PAGE + 1}"
+    later_page = manual.split(page_start, 1)[1].split(page_end, 1)[0]
+    for label in ("Description", "Syntax"):
+        if label not in later_page.splitlines():
+            raise ValueError(
+                f"Later function entry on PDF page {LATER_FUNCTION_PAGE} is missing {label}."
+            )
+    if "315" in later_page.splitlines():
+        raise ValueError("Known printed page number remains in the later function entry.")
+    for header in KNOWN_NAVIGATION_HEADERS:
+        if header in manual.splitlines():
+            raise ValueError(f"Known navigation header remains in extracted text: {header!r}")
 
     if len(records) != report["unique_function_records"]:
         raise ValueError("Training-record count does not match the validation report.")
