@@ -7,17 +7,30 @@
 # Import Libraries 
 #---------------------------------------------------------------------------------------------
 
+import re
 import os
 import json
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import Dataset
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 
 #---------------------------------------------------------------------------------------------
 # Define Functions
 #---------------------------------------------------------------------------------------------
+
+def get_current_version():
+    '''
+    Returns the current version of the script by getting the last version in the output directory
+    '''
+    output_dir = "../../Output/"
+    # List the folders in the directory
+    output_dirs = os.makedirs(output_dir, exist_ok=True)
+    lora_output_regex = "^MataLoraAdapter-v(\d+)$"
+    version_num = re.search(lora_output_regex, max([d for d in os.listdir(output_dir) if re.match(lora_output_regex, d)], key=lambda x: int(re.search(lora_output_regex, x).group(1))))
+
+    return version_num
 
 def main():
     '''
@@ -25,29 +38,29 @@ def main():
     '''
     
     # Open the JSON file and load the data 
-    path = "../Input/Clean/"
+    path = "../../Input/Clean/"
     file_name = "training_data.jsonl"
     file_path = path + file_name
 
     # Configuration
-    MODEL_NAME = "meta-llama/Llama-3.2-1B"  # or use 1B version
-    DATASET_PATH = file_path
-    OUTPUT_DIR = "../Output/"
+    model_name = "meta-llama/Llama-3.2-1B-Instruct"
+    dataset_path = file_path
+    output_dir = "../../Output/MataLoraAdapter-v" + str(get_current_version() + 1)  # Increment version number for new output
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     
     # Step 1: Load the tokenizer
     print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     
     # Step 2: Load the base model
     print("Loading base model...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+        model_name,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
-        )
+        ).to(device)
     
     # Step 4: Configure LoRA
     # This is where the magic happens!
@@ -61,6 +74,7 @@ def main():
     )
     # Apply LoRA to the model
     model = get_peft_model(model, lora_config)
+    print("Trainable parameters in the model:")
     model.print_trainable_parameters()  # Show how many parameters we're actually training
     
     # Step 5: Load and prepare dataset
@@ -74,13 +88,13 @@ def main():
                 text = f"### Human: {item['prompt']}\n### Assistant: {item['completion']}"
                 data.append({"text": text})
         return Dataset.from_list(data)
-    dataset = load_dataset_from_jsonl(DATASET_PATH)
+    dataset = load_dataset_from_jsonl(dataset_path)
     
     # Step 6: Set training parameters
-    training_args = TrainingArguments(
-        output_dir=OUTPUT_DIR,
+    training_args = SFTConfig(
+        output_dir=output_dir,
         num_train_epochs=3,  # Number of complete passes through the data
-        per_device_train_batch_size=1,  # Adjust based on your GPU memory
+        per_device_eval_batch_size=1,  # Adjust based on your GPU memory
         gradient_accumulation_steps=4,  # Simulate larger batch size
         gradient_checkpointing = True,
         learning_rate=2e-4,  # Learning rate for LoRA
@@ -88,6 +102,8 @@ def main():
         logging_steps=10,
         save_strategy="epoch",
         optim="adamw_torch",  # Memory-efficient optimizer
+        max_length=512,
+        dataset_text_field="text",
     )
     
     # Step 7: Initialize trainer
@@ -95,9 +111,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
-        max_seq_length=512,
-        dataset_text_field="text",
+        processing_class=tokenizer,
     )
     
     # Step 8: Start training!
@@ -106,9 +120,9 @@ def main():
     
     # Step 9: Save the fine-tuned model
     print("Saving model...")
-    model.save_pretrained(OUTPUT_DIR)
-    tokenizer.save_pretrained(OUTPUT_DIR)
-    print(f"Training complete! Model saved to {OUTPUT_DIR}")
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+    print(f"Training complete! Model saved to {output_dir}")
     # Load JSON data from previous step
 
     # Load model framework

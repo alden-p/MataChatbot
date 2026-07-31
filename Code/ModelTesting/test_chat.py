@@ -5,8 +5,11 @@
 # Import Libraries
 #--------------------------------------------------------------------------
 
+import re
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import subprocess
+from peft import PeftModel
 
 #--------------------------------------------------------------------------
 # Define Globals 
@@ -19,21 +22,67 @@ torch.mps.manual_seed(42)
 # Define Functions
 #--------------------------------------------------------------------------
 
+def save_answer_to_file(answer, filename):
+    '''
+    This function takes the answer output and saves it to a text file
+    '''
+    
+    with open(filename, "w") as f:
+        f.write(answer)
+
+def run_file_in_stata(filename):
+    '''
+    This function takes a file name and runs it in stata
+    Inputs:
+        filename, a string, the name of the file to run in stata
+    '''
+    
+    subprocess_result = subprocess.run(['stata-se', 'do', filename], capture_output=True, text=True)
+    if subprocess_result.returncode == 0:
+        print(subprocess_result.stdout)
+    else:
+        print(f"Error running Stata file {filename}: {subprocess_result.stderr}")
+    
+    return None
+
+def extract_stata_code(tokenizer, output, inputs):
+    generated_tokens = output[0, inputs["input_ids"].shape[1]:]
+    assistant_response = tokenizer.decode(
+        generated_tokens,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    ).strip()
+    
+    print("Assistant response____________________________________\n", assistant_response, "\n_________________________________________")
+    
+    match = re.search(
+        r"```(?:stata|mata)?\s*\n(.*?)```",
+        assistant_response,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        print("No Stata code block detected")
+        return assistant_response  # Return the entire response if no code block is found
+
+    return match.group(1).strip()
 
 def main():
     
-    test_new = False # Set to True to test the new model
+    # Set the path to the LORA Adapter
+    version = 1 # Change this to the version of the adapter you want to test
+    adapter_path = "../../Output/MataLoraAdapter-v" + str(version)  # Increment version number for new output
+
+    test_new = True # Set to True to test the new model
+    temp = float(1*10**0) 
     
     # Select a model, and the hardware to run it on
     model_name = "meta-llama/Llama-3.2-1B-Instruct"
-    device = device = "mps" if torch.backends.mps.is_available() else "cpu"
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
     
     # Define the conversation we want to use as a test
     messages = [
-        {"role": "system", "content": "Answer concisely and accurately."},
-        {"role": "user", "content": "What is the capital of France?"},
-        #{"role": "assistant", "content": "Paris."},
-        #{"role": "user", "content": "What country is it in?"},
+        {"role": "system", "content": "Write using the Mata programming language."},
+        {"role": "user", "content": "Write a script that prints 'Hello, World!' in Mata and can be run using the stata command. Return only executable code in one ```stata code block; no explanation."},
     ]
     
     print("Loadking Tokenizer")
@@ -62,25 +111,47 @@ def main():
     
     # Display formats of inputs
     #print(inputs)
-
+    
     with torch.inference_mode():
         output = model.generate(
             **inputs,
             max_new_tokens=100,
             do_sample=True,
-            temperature=float(3*10**0),
+            temperature=temp,
         )
     
-    print("______________________PRINTING ANSWER, ORIGINAL MODEL___________________________")
-    answer = tokenizer.decode(output[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)
-    print(answer)
-
+    #old_model_answer = tokenizer.decode(output[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    print("Old model")
+    save_answer_to_file(extract_stata_code(tokenizer, output, inputs), "old_model_test.do")
    
     if test_new:
         # Test the chat functionality of the new model
         print("Testing new model...")
-    # Add code to test the new model here
+        
+        with torch.inference_mode():
+            output = model.generate(
+                    **inputs,
+                    max_new_tokens=100,
+                    do_sample=True,
+                    temperature=temp
+                    )
+        print("Loading Model Adapter")
+        model = PeftModel.from_pretrained(model, adapter_path).to(device)
+        model.eval()
+        
+        # Generate asnwer from the new model
+        #new_model_answer = tokenizer.decode(output[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        print("New model")
+        save_answer_to_file(extract_stata_code(tokenizer, output, inputs), "new_model_test.do")
 
+    # Run the two different files in stata
+    print("___________________________Running old model test in Stata...")
+    run_file_in_stata("old_model_test.do")
+    
+    print("___________________________Running new model test in Stata...")
+    run_file_in_stata("new_model_test.do")
+
+    return()
 #--------------------------------------------------------------------------
 # Run Code
 #--------------------------------------------------------------------------
