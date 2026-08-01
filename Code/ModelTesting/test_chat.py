@@ -55,6 +55,8 @@ def extract_stata_code(tokenizer, output, inputs):
     
     print("Assistant response____________________________________\n", assistant_response, "\n_________________________________________")
     
+    return(re.sub('```', '', assistant_response))
+    '''
     match = re.search(
         r"```(?:stata|mata)?\s*\n(.*?)```",
         assistant_response,
@@ -65,7 +67,7 @@ def extract_stata_code(tokenizer, output, inputs):
         return assistant_response  # Return the entire response if no code block is found
 
     return match.group(1).strip()
-
+    '''
 def main():
     
     # Set the path to the LORA Adapter

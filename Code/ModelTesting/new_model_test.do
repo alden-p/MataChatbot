@@ -1,5 +1,4 @@
-```matabson
-local tata "Hello, World!"
-
-display tata
-```
+matabson
+hello_world() {
+  print 'Hello, World!'
+}
