@@ -1,3 +1,3 @@
 mata
-mes = 'Hello, World!'
-print mes
+* Hello, World! in Mata
+* run: .stata script

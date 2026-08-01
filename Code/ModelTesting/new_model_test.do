@@ -1,4 +1,2 @@
-matabson
-hello_world() {
-  print 'Hello, World!'
-}
+stata
+print 'Hello, World!';

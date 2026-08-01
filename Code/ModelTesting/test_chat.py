@@ -75,7 +75,8 @@ def main():
     adapter_path = "../../Output/MataLoraAdapter-v" + str(version)  # Increment version number for new output
 
     test_new = True # Set to True to test the new model
-    temp = float(1*10**0) 
+    sample_bool = False # Set to True to sample from the model, False to use greedy decoding
+    temp = float(1*10**0) # Set the temperature for sampling
     
     # Select a model, and the hardware to run it on
     model_name = "meta-llama/Llama-3.2-1B-Instruct"
@@ -118,7 +119,7 @@ def main():
         output = model.generate(
             **inputs,
             max_new_tokens=100,
-            do_sample=True,
+            do_sample=sample_bool,
             temperature=temp,
         )
     
@@ -128,21 +129,20 @@ def main():
    
     if test_new:
         # Test the chat functionality of the new model
-        print("Testing new model...")
-        
-        with torch.inference_mode():
-            output = model.generate(
-                    **inputs,
-                    max_new_tokens=100,
-                    do_sample=True,
-                    temperature=temp
-                    )
         print("Loading Model Adapter")
         model = PeftModel.from_pretrained(model, adapter_path).to(device)
         model.eval()
         
+        print("Testing new model...")
+        with torch.inference_mode():
+            output = model.generate(
+                    **inputs,
+                    max_new_tokens=100,
+                    do_sample=sample_bool,
+                    temperature=temp)
+        
         # Generate asnwer from the new model
-        #new_model_answer = tokenizer.decode(output[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        
         print("New model")
         save_answer_to_file(extract_stata_code(tokenizer, output, inputs), "new_model_test.do")
 
