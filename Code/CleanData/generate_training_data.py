@@ -1,4 +1,4 @@
-"""Generate examples from the curated catalog with fixed seed 20260726.
+"""Generate chat-template messages from the curated catalog with fixed seed 20260726.
 
 The fixed seed makes template selection reproducible while retaining catalog order.
 """
@@ -126,8 +126,16 @@ def generate_records(catalog: Sequence[dict[str, str]]) -> list[dict[str, str]]:
 
 
 def render_jsonl(records: Sequence[dict[str, str]]) -> bytes:
+    messages = []
+    for record in records:
+        messages.extend(
+            (
+                {"role": "user", "content": record["prompt"]},
+                {"role": "assistant", "content": record["completion"]},
+            )
+        )
     return "".join(
-        json.dumps(record, ensure_ascii=False) + "\n" for record in records
+        json.dumps(message, ensure_ascii=False) + "\n" for message in messages
     ).encode("utf-8")
 
 
@@ -136,8 +144,8 @@ def main() -> None:
     records = generate_records(catalog)
     TRAINING_DATA_PATH.write_bytes(render_jsonl(records))
     print(
-        f"Generated {len(records)} training records from {len(catalog)} catalog entries "
-        f"using seed {SEED}."
+        f"Generated {len(records)} conversations ({len(records) * 2} messages) from "
+        f"{len(catalog)} catalog entries using seed {SEED}."
     )
 
 

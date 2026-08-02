@@ -12,9 +12,10 @@ def main() -> None:
     training_before = TRAINING_DATA_PATH.read_bytes()
     catalog_count = len(load_catalog(CATALOG_PATH))
     generated_count = len(TRAINING_DATA_PATH.read_text(encoding="utf-8").splitlines())
-    if generated_count != catalog_count * 3:
+    if generated_count != catalog_count * 3 * 2:
         raise ValueError(
-            f"Expected {catalog_count * 3} generated records, found {generated_count}."
+            f"Expected {catalog_count * 3 * 2} generated messages, found "
+            f"{generated_count}."
         )
 
     scrape_manual()

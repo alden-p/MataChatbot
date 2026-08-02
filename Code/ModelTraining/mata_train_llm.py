@@ -10,6 +10,7 @@
 import re
 import os
 import json
+import pandas as pd
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -28,9 +29,9 @@ def get_current_version():
     # List the folders in the directory
     output_dirs = os.makedirs(output_dir, exist_ok=True)
     lora_output_regex = "^MataLoraAdapter-v(\d+)$"
-    version_num = re.search(lora_output_regex, max([d for d in os.listdir(output_dir) if re.match(lora_output_regex, d)], key=lambda x: int(re.search(lora_output_regex, x).group(1))))
-
-    return version_num
+    version_num = re.search(lora_output_regex, max([d for d in os.listdir(output_dir) if re.match(lora_output_regex, d)], key=lambda x: int(re.search(lora_output_regex, x).group(1))))[1]
+    
+    return int(version_num)
 
 def main():
     '''
@@ -40,11 +41,10 @@ def main():
     # Open the JSON file and load the data 
     path = "../../Input/Clean/"
     file_name = "training_data.jsonl"
-    file_path = path + file_name
+    dataset_path = path + file_name
 
     # Configuration
     model_name = "meta-llama/Llama-3.2-1B-Instruct"
-    dataset_path = file_path
     output_dir = "../../Output/MataLoraAdapter-v" + str(get_current_version() + 1)  # Increment version number for new output
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     
@@ -79,17 +79,13 @@ def main():
     
     # Step 5: Load and prepare dataset
     print("Loading dataset...")
-    def load_dataset_from_jsonl(file_path):
-        data = []
-        with open(file_path, 'r') as f:
-            for line in f:
-                item = json.loads(line)
-                # Format as instruction-following
-                text = f"### Human: {item['prompt']}\n### Assistant: {item['completion']}"
-                data.append({"text": text})
-        return Dataset.from_list(data)
-    dataset = load_dataset_from_jsonl(dataset_path)
+    dataset = pd.read_json(dataset_path, lines=True).\
+            to_dict(orient = 'records')
+    dataset = tokenizer.apply_chat_template(dataset, tokenize = False) # Apply the model's selected chat template to the data
+    #dataset = load_dataset_from_jsonl(dataset_path)
     
+    return None
+
     # Step 6: Set training parameters
     training_args = SFTConfig(
         output_dir=output_dir,

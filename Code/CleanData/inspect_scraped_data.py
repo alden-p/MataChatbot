@@ -63,36 +63,57 @@ def template_matches(
 def validate_catalog_and_records() -> tuple[int, int]:
     catalog = load_catalog(CATALOG_PATH)
     records = load_records(TRAINING_DATA_PATH)
-    expected_count = len(catalog) * 3
+    expected_count = len(catalog) * 3 * 2
     if len(records) != expected_count:
         raise ValueError(
-            f"Expected {expected_count} generated records for {len(catalog)} catalog "
+            f"Expected {expected_count} generated messages for {len(catalog)} catalog "
             f"entries, found {len(records)}."
         )
 
     pair_counts = {(entry["function"], entry["purpose"]): 0 for entry in catalog}
     ambiguous = ambiguous_purposes(catalog)
     prompts = set()
-    for number, record in enumerate(records, 1):
-        if set(record) != {"prompt", "completion"}:
-            raise ValueError(f"Record {number} does not have exactly prompt and completion.")
-        for field in ("prompt", "completion"):
-            if not isinstance(record[field], str) or not record[field].strip():
-                raise ValueError(f"Record {number} has a missing {field}.")
+    for message_number in range(0, len(records), 2):
+        user_message, assistant_message = records[message_number : message_number + 2]
+        for number, message, role in (
+            (message_number + 1, user_message, "user"),
+            (message_number + 2, assistant_message, "assistant"),
+        ):
+            if set(message) != {"role", "content"}:
+                raise ValueError(
+                    f"Message {number} does not have exactly role and content."
+                )
+            if message["role"] != role:
+                raise ValueError(
+                    f"Message {number} must have role {role!r}, found "
+                    f"{message['role']!r}."
+                )
+            if not isinstance(message["content"], str) or not message["content"].strip():
+                raise ValueError(f"Message {number} has missing content.")
+
+        record = {
+            "prompt": user_message["content"],
+            "completion": assistant_message["content"],
+        }
         if record["prompt"] in prompts:
-            raise ValueError(f"Record {number} duplicates a generated prompt.")
+            raise ValueError(
+                f"Conversation starting at message {message_number + 1} duplicates "
+                "a generated prompt."
+            )
         prompts.add(record["prompt"])
 
         matches = template_matches(record, catalog, ambiguous)
         if len(matches) != 1:
             raise ValueError(
-                f"Record {number} does not match exactly one approved catalog template."
+                f"Conversation starting at message {message_number + 1} does not match "
+                "exactly one approved catalog template."
             )
         pair, template_id = matches[0]
         if normalize_purpose(pair[1]) in ambiguous and template_id in PURPOSE_ONLY_TEMPLATE_IDS:
             raise ValueError(
-                f"Record {number} uses purpose-only template {template_id!r} for "
-                f"ambiguous purpose {pair[1]!r}."
+                f"Conversation starting at message {message_number + 1} uses "
+                f"purpose-only template {template_id!r} for ambiguous purpose "
+                f"{pair[1]!r}."
             )
         pair_counts[pair] += 1
 
@@ -112,7 +133,7 @@ def validate_catalog_and_records() -> tuple[int, int]:
             "Generated training data does not match byte-for-byte regeneration "
             "with the fixed seed."
         )
-    return len(catalog), len(records)
+    return len(catalog), len(records) // 2
 
 
 def validate_catalog_provenance(catalog: list[dict[str, str]], report: dict) -> None:
