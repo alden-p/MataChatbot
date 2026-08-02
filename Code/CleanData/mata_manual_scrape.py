@@ -19,7 +19,9 @@ from pdfminer.pdfpage import PDFPage
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RAW_PDF_PATH = REPOSITORY_ROOT / "Input/Raw/m-2.pdf"
 TEXT_OUTPUT_PATH = REPOSITORY_ROOT / "Input/Intermediate/mata_manual.txt"
+SECTIONS_OUTPUT_PATH = REPOSITORY_ROOT / "Input/Intermediate/mata_manual_sections.jsonl"
 REPORT_OUTPUT_PATH = REPOSITORY_ROOT / "Input/Intermediate/mata_manual_scrape_report.json"
+CATALOG_PATH = REPOSITORY_ROOT / "Input/Clean/function_catalog.jsonl"
 
 TITLE_PATTERN = re.compile(
     r"^(?P<function>.+?\(\s*\))\s+[—-]\s+"
@@ -79,6 +81,7 @@ EXPECTED_SECTION_LABELS = (
     "Remarks and examples",
     "Also see",
 )
+EXTRACTED_SECTION_LABELS = ("Description", "Syntax", "Remarks and examples")
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,13 @@ class FunctionEntry:
     purpose: str
     pdf_page: int
     printed_page: str
+
+
+@dataclass(frozen=True)
+class RenderedPage:
+    pdf_page: int
+    printed_page: str
+    lines: tuple[str, ...]
 
 
 def iter_text_lines(item) -> Iterable[LTTextLine]:
@@ -198,6 +208,12 @@ def atomic_write_text(path: Path, text: str) -> None:
     os.replace(temporary_path, path)
 
 
+def atomic_write_jsonl(path: Path, records: Sequence[dict]) -> None:
+    atomic_write_text(
+        path, "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+    )
+
+
 def extract_pdf_pages(path: Path) -> List[Tuple[int, List[ExtractedLine]]]:
     if not path.is_file():
         raise FileNotFoundError(f"Source PDF does not exist: {path}")
@@ -245,12 +261,13 @@ def page_furniture_category(row: RenderedRow) -> str | None:
 
 def render_manual(
     pages: Sequence[Tuple[int, List[ExtractedLine]]],
-) -> Tuple[str, List[FunctionEntry], Counter, List[dict]]:
+) -> Tuple[str, List[FunctionEntry], Counter, List[dict], List[RenderedPage]]:
     output = []
     entries = []
     extraction_metrics = Counter()
     retained_section_labels = Counter()
     rejected_headings = []
+    rendered_pages = []
     for page_number, extracted_lines in pages:
         rows = rendered_rows(extracted_lines)
         page_lines = []
@@ -284,9 +301,139 @@ def render_manual(
             marker += f"; printed-page: {printed_page}"
         marker += " -->"
         output.extend((marker, *page_lines, ""))
+        rendered_pages.append(
+            RenderedPage(page_number, printed_page, tuple(page_lines))
+        )
     for label in EXPECTED_SECTION_LABELS:
         extraction_metrics[f"retained_{label}"] = retained_section_labels[label]
-    return "\n".join(output).rstrip() + "\n", entries, extraction_metrics, rejected_headings
+    return (
+        "\n".join(output).rstrip() + "\n",
+        entries,
+        extraction_metrics,
+        rejected_headings,
+        rendered_pages,
+    )
+
+
+def extract_sections(
+    pages: Sequence[RenderedPage], headings: Sequence[FunctionEntry]
+) -> list[dict]:
+    """Split the retained manual text at valid M-5 page-top function headings."""
+    sections = []
+    current = None
+    current_section = None
+    valid_headings = {
+        (heading.pdf_page, heading.function, heading.purpose) for heading in headings
+    }
+    for page in pages:
+        chunk_lines = []
+        for line in page.lines:
+            title, _ = title_from_line(line)
+            if title and (page.pdf_page, title[0], title[1]) in valid_headings:
+                function, purpose, title_page = title
+                if current:
+                    sections.append(current)
+                current = {
+                    "function": function,
+                    "purpose": purpose,
+                    "source_pdf_pages": [],
+                    "printed_pages": [],
+                    "description": "",
+                    "syntax": "",
+                    "remarks_and_examples": "",
+                    "raw_text": "",
+                    "page_chunks": [],
+                }
+                current_section = None
+            if not current:
+                continue
+            if line in EXTRACTED_SECTION_LABELS:
+                current_section = line
+            elif line in EXPECTED_SECTION_LABELS:
+                current_section = None
+            chunk_lines.append(line)
+            if current_section:
+                field = {
+                    "Description": "description",
+                    "Syntax": "syntax",
+                    "Remarks and examples": "remarks_and_examples",
+                }[current_section]
+                if line != current_section:
+                    current[field] += (("\n" if current[field] else "") + line)
+        if current and chunk_lines:
+            current["source_pdf_pages"].append(page.pdf_page)
+            if page.printed_page:
+                current["printed_pages"].append(page.printed_page)
+            marker = f"<!-- source-pdf-page: {page.pdf_page}"
+            if page.printed_page:
+                marker += f"; printed-page: {page.printed_page}"
+            marker += " -->"
+            chunk_text = "\n".join(chunk_lines)
+            current["page_chunks"].append(
+                {
+                    "source_pdf_page": page.pdf_page,
+                    "printed_page": page.printed_page,
+                    "text": chunk_text,
+                }
+            )
+            current["raw_text"] += (("\n" if current["raw_text"] else "") + marker + "\n" + chunk_text)
+    if current:
+        sections.append(current)
+    for section in sections:
+        section["source_pdf_pages"] = sorted(set(section["source_pdf_pages"]))
+        section["printed_pages"] = list(dict.fromkeys(section["printed_pages"]))
+    return sections
+
+
+def section_quality_checks(sections: Sequence[dict]) -> dict:
+    """Reject unusable records and surface extraction artifacts for review."""
+    errors = []
+    flags = []
+    coverage = Counter()
+    for index, section in enumerate(sections, 1):
+        identity = f"entry {index} ({section['function']!r})"
+        if not FUNCTION_IDENTIFIER.fullmatch(section["function"]):
+            errors.append(f"{identity}: missing or malformed function identifier")
+        if not section["source_pdf_pages"]:
+            errors.append(f"{identity}: missing source PDF page")
+        if len(section["purpose"]) < 3 or not re.search(r"[A-Za-z]", section["purpose"]):
+            errors.append(f"{identity}: missing or unreadable purpose")
+        has_syntax = bool(section["syntax"].strip())
+        has_examples = bool(section["remarks_and_examples"].strip())
+        coverage[
+            "both" if has_syntax and has_examples else "syntax" if has_syntax else "examples" if has_examples else "neither"
+        ] += 1
+        raw = section["raw_text"]
+        if CONTROL_CHARACTERS.search(raw):
+            flags.append(f"{identity}: control characters")
+        if re.search(r"\b[A-Za-z_]+\s+[A-Za-z_]+\s*\(\s*\)", raw):
+            flags.append(f"{identity}: possible broken identifier")
+        if any(header in raw for header in NAVIGATION_HEADER_TEXTS):
+            flags.append(f"{identity}: repeated navigation header")
+        if has_syntax and len(section["syntax"].strip()) < 12:
+            flags.append(f"{identity}: suspiciously short syntax")
+        if has_examples and len(section["remarks_and_examples"].strip()) < 20:
+            flags.append(f"{identity}: suspiciously short remarks/examples")
+    if errors:
+        raise ValueError("Section extraction failed:\n" + "\n".join(errors))
+    return {"coverage": dict(coverage), "flags": flags}
+
+
+def catalog_comparison(sections: Sequence[dict]) -> dict:
+    catalog_names = set()
+    catalog_records = 0
+    for line in CATALOG_PATH.read_text(encoding="utf-8").splitlines():
+        catalog_records += 1
+        catalog_names.add(json.loads(line)["function"])
+    extracted_names = {section["function"] for section in sections}
+    return {
+        "catalog_record_count": catalog_records,
+        "catalog_unique_count": len(catalog_names),
+        "extraction_unique_count": len(extracted_names),
+        "record_vs_unique_discrepancy": catalog_records - len(extracted_names),
+        "catalog_only_names": sorted(catalog_names - extracted_names),
+        "extraction_only_names": sorted(extracted_names - catalog_names),
+    }
 
 
 def validation_report(
@@ -340,10 +487,19 @@ def validation_report(
 def main() -> None:
     print("Extracting Mata manual text with page coordinates...")
     pages = extract_pdf_pages(RAW_PDF_PATH)
-    manual_text, entries, extraction_metrics, rejected_headings = render_manual(pages)
+    manual_text, entries, extraction_metrics, rejected_headings, rendered_pages = render_manual(pages)
+    sections = extract_sections(rendered_pages, entries)
+    section_qc = section_quality_checks(sections)
     report = validation_report(pages, entries, extraction_metrics, rejected_headings)
+    report["section_extraction"] = {
+        "occurrences": len(sections),
+        "coverage": section_qc["coverage"],
+        "corruption_flags": section_qc["flags"],
+        "catalog_comparison": catalog_comparison(sections),
+    }
 
     atomic_write_text(TEXT_OUTPUT_PATH, manual_text)
+    atomic_write_jsonl(SECTIONS_OUTPUT_PATH, sections)
     atomic_write_text(REPORT_OUTPUT_PATH, json.dumps(report, indent=2) + "\n")
     print(
         f"Extracted {len(entries)} clean headings and rejected {len(rejected_headings)} "

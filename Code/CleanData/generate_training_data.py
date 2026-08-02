@@ -1,152 +1,80 @@
-"""Generate chat-template messages from the curated catalog with fixed seed 20260726.
+"""Generate deterministic grouped chats from curated facts and validated do-files."""
 
-The fixed seed makes template selection reproducible while retaining catalog order.
-"""
-
+import hashlib
 import json
-import random
-import re
 from pathlib import Path
-from typing import Sequence
+
+ROOT = Path(__file__).resolve().parents[2]
+CATALOG_PATH = ROOT / "Input/Clean/function_catalog.jsonl"
+EXAMPLES_PATH = ROOT / "Input/Clean/mata_code_examples.jsonl"
+VALIDATION_PATH = ROOT / "Input/Intermediate/code_example_validation.json"
+TRAINING_DATA_PATH = ROOT / "Input/Clean/training_data.jsonl"
+CATALOG_CONVERSATION_LIMIT = 20
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-CATALOG_PATH = REPOSITORY_ROOT / "Input/Clean/function_catalog.jsonl"
-TRAINING_DATA_PATH = REPOSITORY_ROOT / "Input/Clean/training_data.jsonl"
-SEED = 20260726
-TEMPLATES = (
-    ("purpose_lookup", "What Mata function is used for {purpose}?", "{function} is the Mata function used for {purpose}."),
-    ("purpose_name", "Name the Mata function for {purpose}.", "The Mata function is {function}."),
-    ("purpose_association", "Which Mata function is associated with {purpose}?", "{function} is associated with {purpose}."),
-    ("purpose_reference", "Find the Mata function described as: {purpose}.", "The reference is {function}, for {purpose}."),
-    ("function_definition", "What does {function} do in Mata?", "{function} is used for {purpose}."),
-    ("function_purpose", "What is the purpose of {function}?", "{function} is used for {purpose}."),
-    ("function_description", "Describe the Mata function {function}.", "{function} is used for {purpose}."),
-    ("reference_completion", "Complete this Mata reference: {function} --", "{function} is used for {purpose}."),
-)
-PURPOSE_ONLY_TEMPLATE_IDS = frozenset(template_id for template_id, *_ in TEMPLATES[:4])
-FUNCTION_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\*?\(\)$")
-WHITESPACE = re.compile(r"\s+")
+def load_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def normalize_purpose(purpose: str) -> str:
-    return WHITESPACE.sub(" ", purpose).strip().casefold()
+def completion_hash(completion: str) -> str:
+    return hashlib.sha256(completion.encode("utf-8")).hexdigest()
 
 
-def load_catalog(path: Path = CATALOG_PATH) -> list[dict[str, str]]:
-    if not path.is_file():
-        raise FileNotFoundError(f"Function catalog does not exist: {path}")
-
-    catalog = []
-    pairs = set()
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ValueError(f"Catalog line {line_number} is invalid JSON: {error.msg}") from error
-        if not isinstance(entry, dict) or set(entry) != {"function", "purpose"}:
-            raise ValueError(
-                f"Catalog line {line_number} must contain exactly function and purpose."
-            )
-        function = entry["function"]
-        purpose = entry["purpose"]
-        if not isinstance(function, str) or not function.strip():
-            raise ValueError(f"Catalog line {line_number} has an empty function.")
-        if not isinstance(purpose, str) or not purpose.strip():
-            raise ValueError(f"Catalog line {line_number} has an empty purpose.")
-        if not FUNCTION_IDENTIFIER.fullmatch(function):
-            raise ValueError(
-                f"Catalog line {line_number} has malformed function identifier {function!r}."
-            )
-        pair = (function, purpose)
-        if pair in pairs:
-            raise ValueError(f"Catalog line {line_number} duplicates {pair!r}.")
-        pairs.add(pair)
-        catalog.append({"function": function, "purpose": purpose})
-    if not catalog:
-        raise ValueError("Function catalog is empty.")
+def load_catalog(path: Path = CATALOG_PATH) -> list[dict]:
+    catalog = load_jsonl(path)
+    for number, entry in enumerate(catalog, 1):
+        if set(entry) != {"function", "purpose"} or not all(isinstance(entry[key], str) and entry[key].strip() for key in entry):
+            raise ValueError(f"Invalid catalog entry {number}.")
     return catalog
 
 
-def ambiguous_purposes(catalog: Sequence[dict[str, str]]) -> set[str]:
-    functions_by_purpose: dict[str, set[str]] = {}
-    for entry in catalog:
-        functions_by_purpose.setdefault(normalize_purpose(entry["purpose"]), set()).add(
-            entry["function"]
-        )
+def validated_examples() -> list[dict]:
+    results = {record["id"]: record for record in json.loads(VALIDATION_PATH.read_text(encoding="utf-8"))}
+    approved = []
+    for example in load_jsonl(EXAMPLES_PATH):
+        result = results.get(example["id"])
+        if not result or result.get("status") != "passed" or result.get("source_hash") != completion_hash(example["completion"]):
+            continue
+        approved.append(example)
+    return approved
+
+
+def message(role: str, content: str, chat_id: int, chat_index: int, kind: str, pages: list[int], tags: list[str], subject: str) -> dict:
     return {
-        purpose
-        for purpose, functions in functions_by_purpose.items()
-        if len(functions) > 1
+        "role": role, "content": content, "chat_id": chat_id, "chat_index": chat_index,
+        "kind": kind, "source_pdf_pages": ";".join(map(str, pages)),
+        "tags": ";".join(tags), "subject": subject,
     }
 
 
-def generate_records(catalog: Sequence[dict[str, str]]) -> list[dict[str, str]]:
-    randomizer = random.Random(SEED)
-    ambiguous = ambiguous_purposes(catalog)
+def generate_records(catalog: list[dict], examples: list[dict]) -> list[dict]:
     records = []
-    prompts = set()
-
-    for entry_number, entry in enumerate(catalog, 1):
-        function = entry["function"]
-        purpose = entry["purpose"]
-        safe_templates = [
-            template
-            for template in TEMPLATES
-            if normalize_purpose(purpose) not in ambiguous
-            or template[0] not in PURPOSE_ONLY_TEMPLATE_IDS
-        ]
-        if len(safe_templates) < 3:
-            raise ValueError(
-                f"Catalog entry {entry_number} ({function!r}, {purpose!r}) has fewer "
-                "than three safe templates."
-            )
-        selected = []
-        for template in randomizer.sample(safe_templates, len(safe_templates)):
-            _, prompt, completion = template
-            record = {
-                "prompt": prompt.format(function=function, purpose=purpose),
-                "completion": completion.format(function=function, purpose=purpose),
-            }
-            if record["prompt"] not in prompts:
-                selected.append(record)
-            if len(selected) == 3:
-                break
-        if len(selected) != 3:
-            raise ValueError(
-                f"Catalog entry {entry_number} ({function!r}, {purpose!r}) cannot "
-                "produce three distinct prompts."
-            )
-        prompts.update(record["prompt"] for record in selected)
-        records.extend(selected)
-
-    if len(records) != len(catalog) * 3:
-        raise ValueError("Generator did not produce exactly three records per catalog entry.")
+    chat_id = 0
+    for entry in catalog[:CATALOG_CONVERSATION_LIMIT]:
+        chat_id += 1
+        tags = ["function-lookup", entry["function"].rstrip("()")]
+        records.extend((
+            message("user", f"What is the purpose of {entry['function']}?", chat_id, 1, "function-lookup", [], tags, entry["function"]),
+            message("assistant", f"{entry['function']} is used for {entry['purpose']}.", chat_id, 2, "function-lookup", [], tags, entry["function"]),
+        ))
+    for example in examples:
+        chat_id += 1
+        source = example["source"]
+        records.extend((
+            message("user", example["prompt"], chat_id, 1, "executable-code", source["source_pdf_pages"], example["features"], source["function"]),
+            message("assistant", example["completion"], chat_id, 2, "executable-code", source["source_pdf_pages"], example["features"], source["function"]),
+        ))
     return records
 
 
-def render_jsonl(records: Sequence[dict[str, str]]) -> bytes:
-    messages = []
-    for record in records:
-        messages.extend(
-            (
-                {"role": "user", "content": record["prompt"]},
-                {"role": "assistant", "content": record["completion"]},
-            )
-        )
-    return "".join(
-        json.dumps(message, ensure_ascii=False) + "\n" for message in messages
-    ).encode("utf-8")
+def render_jsonl(records: list[dict]) -> bytes:
+    return "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records).encode()
 
 
 def main() -> None:
-    catalog = load_catalog()
-    records = generate_records(catalog)
+    records = generate_records(load_catalog(), validated_examples())
     TRAINING_DATA_PATH.write_bytes(render_jsonl(records))
-    print(
-        f"Generated {len(records)} conversations ({len(records) * 2} messages) from "
-        f"{len(catalog)} catalog entries using seed {SEED}."
-    )
+    print(f"Generated {len(records) // 2} chats ({len(records)} messages).")
 
 
 if __name__ == "__main__":

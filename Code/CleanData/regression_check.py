@@ -10,13 +10,11 @@ from mata_manual_scrape import main as scrape_manual
 def main() -> None:
     catalog_before = CATALOG_PATH.read_bytes()
     training_before = TRAINING_DATA_PATH.read_bytes()
-    catalog_count = len(load_catalog(CATALOG_PATH))
+    if not load_catalog(CATALOG_PATH):
+        raise ValueError("Curated function catalog is empty.")
     generated_count = len(TRAINING_DATA_PATH.read_text(encoding="utf-8").splitlines())
-    if generated_count != catalog_count * 3 * 2:
-        raise ValueError(
-            f"Expected {catalog_count * 3 * 2} generated messages, found "
-            f"{generated_count}."
-        )
+    if generated_count == 0 or generated_count % 2:
+        raise ValueError(f"Expected a nonempty even number of messages, found {generated_count}.")
 
     scrape_manual()
 
